@@ -10,7 +10,7 @@ RegimeVGGT accelerates VGGT without training by combining saliency-guided token 
   <img src="image/overview.png" width="900" alt="RegimeVGGT pipeline overview">
 </p>
 
-## Final method
+## method
 
 The method uses the fixed policy below. Layer numbers are one-based.
 
