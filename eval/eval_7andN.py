@@ -1,3 +1,5 @@
+"""Evaluate the final RegimeVGGT method on 7Scenes and NRGBD."""
+
 import os
 import sys
 
@@ -12,14 +14,12 @@ import argparse
 import numpy as np
 import open3d as o3d
 import os.path as osp
-from torch.utils.data import DataLoader
 from torch.utils.data._utils.collate import default_collate
 from tqdm import tqdm
 from collections import defaultdict
-import torchvision.transforms as transforms
 
 
-# ── RegimeVGGT: helper functions for our methods ──────────────────────
+# RegimeVGGT predictions
 
 def _heads_to_preds(model, output_list, psi, imgs_tensor):
     """Call model heads on aggregator output -> standard preds dict."""
@@ -39,148 +39,46 @@ def _heads_to_preds(model, output_list, psi, imgs_tensor):
     return preds
 
 
-def _run_regimevggt(model, imgs_tensor, args):
-    """RegimeVGGT: merge + phase-shift subsample subsample (+ optional anchor)."""
+def _run_regimevggt(model, imgs_tensor):
+    """Run the fixed final method and decode all reconstruction heads."""
     from methods.regimevggt import run_aggregator_regimevggt
     imgs = imgs_tensor.unsqueeze(0) if imgs_tensor.dim() == 4 else imgs_tensor
-    output_list, psi = run_aggregator_regimevggt(
-        model, imgs,
-        shallow_merge_ratio=args.shallow_merge_ratio,
-        merge_ratio=args.merge_ratio_ours,
-        deep_merge_ratio=args.deep_merge_ratio,
-        middle_merge_start=args.middle_merge_start,
-        deep_merge_start=args.deep_merge_start,
-        cache_band_starts=(args.cache_band_starts if args.cache_band_starts else None),
-        no_cache_layers=(args.no_cache_layers if args.no_cache_layers else None),
-        importance_method=args.importance,
-        protect_last=(not args.no_protect_last),
-        sigma_sub=args.hyb_sigma_sub,
-        sigma_shallow=args.hyb_sigma_shallow,
-        sigma_deep=args.hyb_sigma_deep,
-        use_phase_shift=args.hyb_use_phase_shift,
-        use_regimevggt_mean_fill=args.hyb_regimevggt_mean_fill,
-        use_regimevggt_full=args.hyb_regimevggt_full,
-        protect_middle=args.hyb_protect_middle,
-        middle_range=tuple(args.hyb_middle_range),
-        anchor_frame_idx=(args.hyb_anchor_frame
-                          if args.hyb_anchor_frame >= 0 else None),
-    )
+    output_list, psi = run_aggregator_regimevggt(model, imgs)
     return _heads_to_preds(model, output_list, psi, imgs)
 
 
 # ── Arg parser ──────────────────────────────────────────────────────
 
 def get_args_parser():
-    parser = argparse.ArgumentParser("3D Reconstruction evaluation", add_help=False)
-    parser.add_argument(
-        "--ckpt_path", type=str,
-        default=osp.join(ROOT_DIR, "..", "ckpt", "model_tracker_fixed_e20.pt"),
-        help="checkpoint path",
-    )
+    parser = argparse.ArgumentParser("RegimeVGGT 7Scenes / NRGBD evaluation")
+    parser.add_argument("--ckpt_path", type=str,
+                        default=osp.join(ROOT_DIR, "ckpt", "model_tracker_fixed_e20.pt"))
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--model_name", type=str, default="VGGT")
-    parser.add_argument("--conf_thresh", type=float, default=0.0)
-    parser.add_argument("--output_dir", type=str, default="./results/main")
-    parser.add_argument("--size", type=int, default=518)
-    parser.add_argument("--revisit", type=int, default=1)
-    parser.add_argument("--freeze", action="store_true")
+    parser.add_argument("--output_dir", type=str, default="./results/regimevggt")
+    parser.add_argument("--size", type=int, default=518, choices=[224, 512, 518])
     parser.add_argument("--use_proj", action="store_true")
-    parser.add_argument("--merging", type=int, default=0)
-    parser.add_argument("--merge_ratio", type=float, default=0.9)
-    parser.add_argument("--kf", type=int, default=10, help="keyframe stride (paper uses 3 or 10)")
-
-    # --- RegimeVGGT additions ---
-    parser.add_argument("--method", type=str, default="regimevggt",
-                        choices=["baseline", "regimevggt"],
-                        help="'baseline' is uncompressed VGGT* for reference.")
-    parser.add_argument("--datasets", type=str, nargs="*",
+    parser.add_argument("--kf", type=int, default=10, help="Keyframe stride (paper: 3 or 10).")
+    parser.add_argument("--datasets", type=str, nargs="+", choices=["7scenes", "NRGBD"],
                         default=["7scenes", "NRGBD"])
-    parser.add_argument("--7scenes_root", type=str, default=None,
-                        help="Root of the 7Scenes dataset (required for "
-                             "--datasets 7scenes).")
-    parser.add_argument("--nrgbd_root", type=str, default=None,
-                        help="Root of the NRGBD dataset (required for "
-                             "--datasets NRGBD).")
-    parser.add_argument("--skip_layers", type=int, nargs="*",
-                        default=[])
-    parser.add_argument("--g2f_layers", type=int, nargs="*",
-                        default=None,
-                        help="layers to run Global-to-Frame (per-frame global, no cross-view). "
-                             "Overrides skip_layers for those layers.")
-    parser.add_argument("--shallow_merge_ratio", type=float, default=0.99,
-                        help="Ratio for layers < middle_merge_start (default 0.99)")
-    parser.add_argument("--merge_ratio_ours", type=float, default=0.95,
-                        help="Middle-band ratio (default 0.95)")
-    parser.add_argument("--deep_merge_ratio", type=float, default=0.99,
-                        help="Ratio for layers >= deep_merge_start (default 0.99)")
-    parser.add_argument("--middle_merge_start", type=int, default=10,
-                        help="First layer of middle band (shallow->middle boundary)")
-    parser.add_argument("--deep_merge_start", type=int, default=18,
-                        help="First layer to apply deep_merge_ratio")
-    parser.add_argument("--no_protect_last", action="store_true",
-                        help="Remove L23 hard-coded full-no-merge protection.")
-    parser.add_argument("--global_start_layer", type=int, default=10,
-                        help="first layer to enable global attention (shallow_skip_global method)")
-    parser.add_argument("--cache_interval", type=int, default=4,
-                        help="recompute merge indices every N layers (importance_merging)")
-    parser.add_argument("--no_cache_layers", type=int, nargs="*", default=[],
-                        help="Layer indices where merge cache is force-disabled.")
-    parser.add_argument("--cache_band_starts", type=int, nargs="*", default=[],
-                        help="Band-based caching: one cache compute per band. "
-                             "Overrides cache_interval when set.")
-    parser.add_argument("--importance", type=str, default="dino_attn",
-                        choices=["sobel", "dino_attn", "token_norm", "frame_attn", "geom_probe_l0", "geom_probe_l9"],
-                        help="token importance scoring method for importance_merging")
-    parser.add_argument("--merge_strategy", type=str, default="bipartite",
-                        choices=["bipartite", "importance", "random", "spatial"],
-                        help="token merge strategy for importance_merging")
-    # Merge-then-subsample composition flags.
-    # ── Phase-shift subsample flags ──
-    parser.add_argument("--ps_sigma_s", type=float, default=1.5,
-                        help="phase_shift: shallow band sigma (default 1.5).")
-    parser.add_argument("--ps_sigma_m", type=float, default=1.5,
-                        help="phase_shift: middle band sigma (default 1.5).")
-    parser.add_argument("--ps_sigma_d", type=float, default=1.5,
-                        help="phase_shift: deep band sigma (default 1.5).")
-    parser.add_argument("--ps_band_boundaries", type=int, nargs=3, default=[0, 10, 18],
-                        help="phase_shift: (b0, b1, b2) band starts; layers [b0,b1) shallow, "
-                             "[b1,b2) middle, [b2,depth) deep.")
-    parser.add_argument("--ps_use_phase_shift", action="store_true",
-                        help="phase_shift: enable phase shift (vs fixed grid).")
-    parser.add_argument("--ps_anchor_frame", type=int, default=-1,
-                        help="phase_shift: keep ALL K/V on this frame (-1 = no anchor).")
-    parser.add_argument("--ps_regimevggt_mean_fill", action="store_true",
-                        help="phase_shift: RegimeVGGT mean-fill on dropped K/V.")
-    parser.add_argument("--ps_regimevggt_full", action="store_true",
-                        help="phase_shift: full RegimeVGGT (selected + diagonal + mean-fill).")
-
-    parser.add_argument("--hyb_use_phase_shift", action="store_true",
-                        help="regimevggt: enable phase-shift on merged K/V.")
-    parser.add_argument("--hyb_sigma_sub", type=float, default=2.0,
-                        help="regimevggt: per-band sigma fallback (middle band uses this).")
-    parser.add_argument("--hyb_sigma_shallow", type=float, default=None,
-                        help="regimevggt: shallow band sigma; defaults to hyb_sigma_sub.")
-    parser.add_argument("--hyb_sigma_deep", type=float, default=None,
-                        help="regimevggt: deep band sigma; defaults to hyb_sigma_sub.")
-    parser.add_argument("--hyb_regimevggt_mean_fill", action="store_true",
-                        help="regimevggt: RegimeVGGT mean-fill on merged K/V (no diagonal).")
-    parser.add_argument("--hyb_regimevggt_full", action="store_true",
-                        help="regimevggt: full RegimeVGGT (selected + diagonal + mean-fill).")
-    parser.add_argument("--hyb_protect_middle", action="store_true",
-                        help="regimevggt: middle-band layers do merge only (no subsample).")
-    parser.add_argument("--hyb_middle_range", type=int, nargs=2, default=[10, 18],
-                        help="regimevggt: [start, end) range treated as middle band.")
-    parser.add_argument("--hyb_anchor_frame", type=int, default=-1,
-                        help="regimevggt: keep ALL merged tokens whose parent lies in "
-                             "this frame (reference-frame anchor). -1 = no anchor.")
+    parser.add_argument("--7scenes_root", type=str, default=None)
+    parser.add_argument("--nrgbd_root", type=str, default=None)
     return parser
 
 
 # ── Main ────────────────────────────────────────────────────────────
 
 def main(args):
-    from data import SevenScenes, NRGBD
-    from utils import accuracy, completion
+    try:
+        from data import SevenScenes, NRGBD
+        from utils import accuracy, completion
+        from utils.criterion import Regr3D_t_ScaleShiftInv, L21
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "7Scenes/NRGBD evaluation requires the original evaluation data and "
+            "metric packages (data, utils, utils.criterion), which are not bundled "
+            "in this release. Restore those exact protocol dependencies before "
+            "running this benchmark; see README.md. Missing module: " + str(exc.name)
+        ) from exc
 
     if args.size == 512:
         resolution = (512, 384)
@@ -212,35 +110,24 @@ def main(args):
         )
 
     device = args.device
-    model_name = args.model_name
-
-    from utils.criterion import Regr3D_t_ScaleShiftInv, L21
 
     # Load model.
     from vggt.models.vggt import VGGT
     from vggt.utils.pose_enc import pose_encoding_to_extri_intri
     from vggt.utils.geometry import unproject_depth_map_to_point_map
 
-    if args.method == "regimevggt":
-        # RegimeVGGT drives merge from the aggregator wrapper, not via the
-        # VGGT.merging path - keep merging=0 here.
-        model = VGGT(merging=0, merge_ratio=args.merge_ratio_ours, enable_point=True)
-    else:
-        model = VGGT(merging=24, merge_ratio=0.0, enable_point=True)
+    model = VGGT(enable_point=True)
 
     ckpt = torch.load(args.ckpt_path, map_location="cpu", mmap=False)
     model.load_state_dict(ckpt, strict=False)
     del ckpt
     model = model.cuda().eval().to(torch.bfloat16)
 
-    method_dir = osp.join(args.output_dir, args.method, f"{args.kf}")
-    os.makedirs(method_dir, exist_ok=True)
-
     criterion = Regr3D_t_ScaleShiftInv(L21, norm_mode=False, gt_scale=True)
 
     with torch.no_grad():
         for name_data, dataset in datasets_all.items():
-            save_path = osp.join(method_dir, name_data)
+            save_path = osp.join(args.output_dir, name_data, f"kf_{args.kf}")
             os.makedirs(save_path, exist_ok=True)
             log_file = osp.join(save_path, "logs.txt")
 
@@ -308,13 +195,7 @@ def main(args):
                         torch.cuda.synchronize()
                         start = time.time()
 
-                        # ── Method dispatch ──
-                        if args.method == "baseline":
-                            preds = model(imgs_tensor)
-                        elif args.method == "regimevggt":
-                            preds = _run_regimevggt(model, imgs_tensor, args)
-                        else:
-                            raise ValueError(f"Unknown method: {args.method}")
+                        preds = _run_regimevggt(model, imgs_tensor)
 
                         torch.cuda.synchronize()
                         end = time.time()
@@ -368,11 +249,6 @@ def main(args):
                         ress.append(res)
 
                     preds = ress
-
-                    valid_length = len(preds) // args.revisit
-                    if args.revisit > 1:
-                        preds = preds[-valid_length:]
-                        batch = batch[-valid_length:]
 
                     # Evaluation
                     print(f"Evaluation for {name_data} {data_idx+1}/{len(dataset)}")

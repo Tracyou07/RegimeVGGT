@@ -224,6 +224,11 @@ def token_merge_bipartite2d(
                         flat_view
                     )
 
+        if enable_protection:
+            # Destinations already survive merging; only source tokens need
+            # the separate protected pool, otherwise their mass is counted twice.
+            protected_indices = protected_indices[idx_buffer_seq[protected_indices] != -1]
+
         rand_idx = idx_buffer_seq.reshape(1, -1, 1).argsort(dim=1)
         num_dst_orig = int((idx_buffer_seq == -1).sum())
 

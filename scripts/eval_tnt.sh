@@ -16,8 +16,6 @@
 #   TNT_COLMAP_DIR=/data/tnt/poses \
 #   CKPT=ckpt/model_tracker_fixed_e20.pt \
 #       bash scripts/eval_tnt.sh
-#
-# Paper Table 4: AUC@30 0.9105 / 111s / 5.01x.
 
 set -euo pipefail
 
@@ -31,26 +29,11 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 OUT_DIR="${REPO_ROOT}/results/regimevggt/tnt"
 mkdir -p "${OUT_DIR}"
 
-# canonical RegimeVGGT config: Line-A merge (rho=0.99/0.50/0.99, cache=(0,10,18))
-# composed with Line-B uniform sigma_b=1.5 + frame-0 anchor.
 python "${REPO_ROOT}/eval/eval_pose_tnt.py" \
     --tnt_dir       "${TNT_DIR}" \
     --colmap_dir    "${TNT_COLMAP_DIR}" \
-    --ckpt          "${CKPT}" \
-    --output_dir    "${OUT_DIR}" \
-    --kf_every      1 \
-    --method                regimevggt \
-    --shallow_merge_ratio   0.99 \
-    --merge_ratio_ours      0.50 \
-    --deep_merge_ratio      0.99 \
-    --cache_band_starts     0 10 18 \
-    --no_cache_layers       10 11 12 13 \
-    --hyb_sigma_sub         1.3 \
-    --hyb_sigma_shallow     1.5 \
-    --hyb_sigma_deep        1.7 \
-    --hyb_use_phase_shift \
-    --hyb_anchor_frame_mode first \
-    --hyb_protect_middle \
-    --hyb_middle_range      10 14
+    --ckpt_path     "${CKPT}" \
+    --save_dir      "${OUT_DIR}" \
+    --kf_every      1
 
 echo "Results written to ${OUT_DIR}"
