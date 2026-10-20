@@ -3,7 +3,6 @@ from PIL import Image
 import cv2
 import io
 import random
-import time
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 from copy import deepcopy
@@ -23,8 +22,6 @@ from scipy.spatial.transform import Rotation
 from torchvision import transforms as TF
 
 
-from vggt.utils.geometry import unproject_depth_map_to_point_map
-from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
 
 def shuffle_deque(dq, seed=None):
@@ -48,71 +45,6 @@ def imread_cv2(path, options=cv2.IMREAD_COLOR):
     if img.ndim == 3:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return img
-
-
-# Import umeyama_alignment for internal use in eval_trajectory
-def umeyama_alignment(src, dst, estimate_scale=True):
-    # Ensure inputs have correct shape
-    assert (
-        src.shape == dst.shape
-    ), f"Input shapes don't match: src {src.shape}, dst {dst.shape}"
-    assert src.shape[0] == 3, f"Expected point cloud dimension (3,N), got {src.shape}"
-
-    # Compute centroids
-    src_mean = src.mean(axis=1, keepdims=True)
-    dst_mean = dst.mean(axis=1, keepdims=True)
-
-    # Center the point clouds
-    src_centered = src - src_mean
-    dst_centered = dst - dst_mean
-
-    # Compute covariance matrix
-    cov = dst_centered @ src_centered.T
-
-    try:
-        # Singular Value Decomposition
-        U, D, Vt = svd(cov)
-        V = Vt.T
-
-        # Handle reflection case
-        det_UV = np.linalg.det(U @ V.T)
-        S = np.eye(3)
-        if det_UV < 0:
-            S[2, 2] = -1
-
-        # Compute rotation matrix
-        R = U @ S @ V.T
-
-        if estimate_scale:
-            # Compute scale factor - fix dimension issue
-            src_var = np.sum(src_centered * src_centered)
-            if src_var < 1e-10:
-                print(
-                    "Warning: Source point cloud variance close to zero, setting scale factor to 1.0"
-                )
-                scale = 1.0
-            else:
-                # Fix potential dimension issue with np.diag(S)
-                # Use diagonal elements directly
-                scale = np.sum(D * np.diag(S)) / src_var
-        else:
-            scale = 1.0
-
-        # Compute translation vector
-        t = dst_mean.ravel() - scale * (R @ src_mean).ravel()
-
-        return scale, R, t
-
-    except Exception as e:
-        print(f"Error in umeyama_alignment computation: {e}")
-        print(
-            "Returning default transformation: scale=1.0, rotation=identity matrix, translation=centroid difference"
-        )
-        # Return default transformation
-        scale = 1.0
-        R = np.eye(3)
-        t = (dst_mean - src_mean).ravel()
-        return scale, R, t
 
 
 def compute_chamfer_distance(points_pred, points_gt, max_dist=1.0):
@@ -435,15 +367,6 @@ def get_sorted_image_paths(images_dir):
     return image_paths
 
 
-def to_homogeneous(extrinsics):
-    n = extrinsics.shape[0]
-    homogeneous_extrinsics = np.eye(4)[None, :, :].repeat(
-        n, axis=0
-    )  # Create identity matrix
-    homogeneous_extrinsics[:, :3, :4] = extrinsics  # Copy [R|t] part
-    return homogeneous_extrinsics
-
-
 def umeyama_alignment(src, dst, estimate_scale=True):
     # Ensure inputs have correct shape
     assert (
@@ -588,133 +511,6 @@ def load_images_rgb(image_paths: List[Path]) -> List[np.ndarray]:
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         images.append(img)
     return images
-
-
-def compute_original_coords(
-    image_path_list,
-    new_width=518,
-):
-    """
-    Compute only original_coords to map predictions made on a fixed-resolution
-    canvas (e.g., 518x294) back to the original image coordinates.
-
-    This mirrors the coordinate logic of load_and_preprocess_images_downscale
-    without constructing/resizing any images to avoid redundant work. Use this
-    when the caller prepares model inputs separately via get_vgg_input_imgs.
-
-    Args:
-        image_path_list (list): List of image file paths.
-        new_width (int): Target canvas width (drives scale = new_width / max_dim).
-        new_height (int): Target canvas height (kept for API parity; unused here).
-
-    Returns:
-        torch.Tensor: Float tensor of shape (N, 6), each row is
-            [x1, y1, x2, y2, width, height].
-    """
-    if len(image_path_list) == 0:
-        raise ValueError("At least 1 image is required")
-
-    original_coords = []
-    for image_path in image_path_list:
-        img = Image.open(image_path)
-        img = img.convert("RGB")
-
-        width, height = img.size
-        max_dim = max(width, height)
-
-        left = (max_dim - width) // 2
-        top = (max_dim - height) // 2
-
-        scale = new_width / max_dim
-
-        x1 = left * scale
-        y1 = top * scale
-        x2 = (left + width) * scale
-        y2 = (top + height) * scale
-
-        original_coords.append(
-            np.array([x1, y1, x2, y2, width, height], dtype=np.float32)
-        )
-
-    original_coords = torch.from_numpy(np.stack(original_coords, axis=0)).float()
-    return original_coords
-
-
-@torch.no_grad()
-def infer_vggt_and_reconstruct(
-    model: torch.nn.Module,
-    vgg_input: torch.Tensor,
-    dtype: torch.dtype,
-    depth_conf_thresh: float,
-    image_paths: list = None,
-) -> Tuple[
-    np.ndarray,
-    np.ndarray,
-    List[np.ndarray],
-    List[np.ndarray],
-    List[np.ndarray],
-    float,
-]:
-    torch.cuda.synchronize()
-    start = time.time()
-    with torch.cuda.amp.autocast(dtype=dtype):
-        vgg_input_cuda = vgg_input.cuda().to(torch.bfloat16)
-        predictions = model(vgg_input_cuda, image_paths=image_paths)
-    torch.cuda.synchronize()
-    end = time.time()
-    inference_time_ms = (end - start) * 1000.0
-
-    extrinsic, intrinsic = pose_encoding_to_extri_intri(
-        predictions["pose_enc"], (vgg_input.shape[2], vgg_input.shape[3])
-    )
-
-    depth_tensor = predictions["depth"]
-    depth_conf = predictions["depth_conf"]
-    depth_conf_np = depth_conf[0].detach().float().cpu().numpy()
-    depth_mask = depth_conf_np >= depth_conf_thresh
-    depth_filtered = depth_tensor[0].detach().float().cpu().numpy()
-    depth_filtered[~depth_mask] = np.nan
-    depth_np = depth_filtered
-
-    extrinsic_np = extrinsic[0].detach().float().cpu().numpy()
-    intrinsic_np = intrinsic[0].detach().float().cpu().numpy()
-
-    world_points = unproject_depth_map_to_point_map(
-        depth_np, extrinsic_np, intrinsic_np
-    )
-    all_points: List[np.ndarray] = []
-    all_colors: List[np.ndarray] = []
-
-    # Prepare RGB images aligned with vgg_input for coloring point clouds (0-255, uint8)
-    vgg_np = vgg_input.detach().float().cpu().numpy()  # [S, 3, H, W] in [0,1]
-
-    for frame_idx in range(world_points.shape[0]):
-        points = world_points[frame_idx].reshape(-1, 3)
-        valid_mask = ~np.isnan(points).any(axis=1) & ~np.isinf(points).any(axis=1)
-        valid_points = points[valid_mask]
-        if len(valid_points) > 0:
-            all_points.append(valid_points)
-
-            # Generate corresponding colors
-            img_chw = vgg_np[frame_idx]  # [3, H, W]
-            img_hwc = (
-                (np.transpose(img_chw, (1, 2, 0)) * 255.0).clip(0, 255).astype(np.uint8)
-            )  # [H, W, 3] uint8
-            rgb_flat = img_hwc.reshape(-1, 3)
-            valid_colors = rgb_flat[valid_mask]
-            all_colors.append(valid_colors)
-
-    camera_poses = to_homogeneous(extrinsic_np)
-    all_cam_to_world_mat = list(camera_poses)
-
-    return (
-        extrinsic_np,
-        intrinsic_np,
-        all_points,
-        all_colors,
-        all_cam_to_world_mat,
-        inference_time_ms,
-    )
 
 
 def evaluate_scene_and_save(

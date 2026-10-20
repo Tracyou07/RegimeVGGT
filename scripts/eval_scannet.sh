@@ -10,6 +10,7 @@
 #   SCANNET_GT_PLY — directory of ScanNet ground-truth scene PLYs
 #                    (one <scene>_vh_clean_2.ply per scene).
 #   CKPT           — path to model_tracker_fixed_e20.pt.
+#   SCANNET_SPLIT  — original ScanNet-50 scene manifest (one scene ID per line).
 #
 # Optional env vars:
 #   FRAMES         — input frame count (default: runs the full
@@ -19,15 +20,15 @@
 #   SCANNET_DATA=/data/scannet/processed \
 #   SCANNET_GT_PLY=/data/scannet/scans \
 #   CKPT=ckpt/model_tracker_fixed_e20.pt \
+#   SCANNET_SPLIT=/data/protocol/scannet50.txt \
 #       bash scripts/eval_scannet.sh
-#
-# Paper: ScanNet N=1000 CD 0.472 / 71.7s.
 
 set -euo pipefail
 
 : "${SCANNET_DATA:?Set SCANNET_DATA to your processed ScanNet-50 frames root.}"
 : "${SCANNET_GT_PLY:?Set SCANNET_GT_PLY to your ScanNet ground-truth PLY root.}"
 : "${CKPT:?Set CKPT to your VGGT-1B checkpoint path.}"
+: "${SCANNET_SPLIT:?Set SCANNET_SPLIT to the original ScanNet-50 scene manifest.}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
@@ -35,16 +36,14 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 OUT_DIR="${REPO_ROOT}/results/regimevggt/scannet"
 mkdir -p "${OUT_DIR}"
 
-EXTRA_ARGS=()
-if [[ -n "${FRAMES:-}" ]]; then
-    EXTRA_ARGS+=(--num_frames "${FRAMES}")
-fi
-
-python "${REPO_ROOT}/eval/eval_scannet50.py" \
-    --data_dir       "${SCANNET_DATA}" \
-    --gt_ply_dir     "${SCANNET_GT_PLY}" \
-    --output_path    "${OUT_DIR}" \
-    --method         regimevggt \
-    "${EXTRA_ARGS[@]}"
+for frames in ${FRAMES:-1000 500 300 100}; do
+    python "${REPO_ROOT}/eval/eval_scannet50.py" \
+        --data_dir       "${SCANNET_DATA}" \
+        --gt_ply_dir     "${SCANNET_GT_PLY}" \
+        --scene_list     "${SCANNET_SPLIT}" \
+        --ckpt_path      "${CKPT}" \
+        --input_frame    "${frames}" \
+        --output_path    "${OUT_DIR}"
+done
 
 echo "Results written to ${OUT_DIR}"
