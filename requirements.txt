@@ -10,7 +10,6 @@ opencv-python>=4.8
 
 # Evaluation
 open3d>=0.18         # dense reconstruction and point-cloud metrics
-evo>=1.25            # trajectory metrics
 scipy>=1.11          # SVD and alignment
 tqdm>=4.66           # evaluation progress
 matplotlib>=3.7       # diagnostic plots

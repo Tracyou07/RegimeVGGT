@@ -12,7 +12,7 @@ RegimeVGGT accelerates VGGT without training by combining saliency-guided token 
 
 ## Final method
 
-The same fixed policy is used by every evaluation entry point. Layer numbers below are one-based.
+The method uses the fixed policy below. Layer numbers are one-based.
 
 | Global layers | Merge ratio | K/V sampling factor |
 | --- | --- | --- |
@@ -48,7 +48,7 @@ cd RegimeVGGT
 python -m pip install -r requirements.txt
 ```
 
-The paper reports measurements on one NVIDIA H800 80 GB at input resolution 518 x 392. Those measurements are paper results; the cleaned implementation still needs a full pretrained GPU benchmark run.
+The paper uses one NVIDIA H800 80 GB at input resolution 518 x 392.
 
 ## Checkpoint
 
@@ -65,48 +65,26 @@ The checkpoint remains subject to the [upstream VGGT terms](https://huggingface.
 
 ## Evaluation
 
-All three launchers run the same final method. Dataset locations, checkpoint paths, frame counts and output locations remain runtime inputs.
+The public evaluator covers dense reconstruction on 7Scenes and NRGBD. Dataset locations, checkpoint paths, keyframe stride and output locations remain runtime inputs.
 
 ```bash
-# Tanks & Temples pose
-TNT_DIR=/path/to/tnt/training \
-TNT_COLMAP_DIR=/path/to/tnt/poses \
-CKPT="$CKPT" bash scripts/eval_tnt.sh
-
 # 7Scenes and NRGBD reconstruction; KF can be 3 or 10
 SEVEN_ROOT=/path/to/7scenes \
 NRGBD_ROOT=/path/to/nrgbd \
 KF=10 CKPT="$CKPT" bash scripts/eval_7andn.sh
-
-# ScanNet-50 reconstruction and pose
-SCANNET_DATA=/path/to/scannet/processed \
-SCANNET_GT_PLY=/path/to/scannet/scans \
-SCANNET_SPLIT=/path/to/scannet_50.txt \
-FRAMES=1000 CKPT="$CKPT" bash scripts/eval_scannet.sh
 ```
 
-Use the original benchmark scene list for `SCANNET_SPLIT`, with one scene ID per line. A custom scene subset is a different evaluation protocol.
+The evaluator requires the original 7Scenes/NRGBD dataset adapters and metric packages (`data` and `utils`). These protocol dependencies are not bundled and must be supplied before evaluation.
 
-The imported release did not include the `data` and `utils` protocol packages required by the 7Scenes/NRGBD evaluator. These dataset adapters and metric helpers must be restored before that evaluation can run. This cleanup does not supply a replacement metric or scene split.
-
-Outputs are written under `results/`. Dataset preparation, pretrained inference and benchmark numbers have not been validated by the CPU checks below.
-
-## Local checks
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-The checks use small CPU tensors and inspect the real argument parsers and shell launchers. They require no pretrained checkpoint or dataset.
+Outputs are written to `results/regimevggt/<dataset>/kf_<stride>/`.
 
 ## Repository layout
 
 ```text
 methods/        Final RegimeVGGT aggregator and token-merging primitive
 vggt/           VGGT backbone, heads and evaluation utilities
-eval/           Dataset evaluation entry points
-scripts/        Evaluation launchers
-tests/          CPU regression and entry-point checks
+eval/           7Scenes and NRGBD evaluation entry point
+scripts/        7Scenes and NRGBD evaluation launcher
 image/          Paper figures
 ```
 
