@@ -1,173 +1,131 @@
 # RegimeVGGT
 
-**Training-free acceleration for VGGT via a layer-wise rank-band prior.**
+Code for **RegimeVGGT: Layer-Wise Spatially Preserving Redundancy Removal for Visual Geometry Grounded Transformer**.
 
-> Anonymous code release for NeurIPS 2026 submission. Author information
-> and original repository links are intentionally omitted for double-blind
-> review.
+[Paper](https://arxiv.org/abs/2606.18439) | [Method](https://arxiv.org/html/2606.18439v1#S3)
+
+RegimeVGGT accelerates VGGT without training by combining saliency-guided token merging and selectively protected K/V downsampling. This repository exposes the final method described in Sections 3.2 and 3.3 of the linked paper.
 
 <p align="center">
   <img src="image/overview.png" width="900" alt="RegimeVGGT pipeline overview">
 </p>
 
----
+## Final method
 
-## Abstract
+The same fixed policy is used by every evaluation entry point. Layer numbers below are one-based.
 
-Visual Geometry Grounded Transformer (VGGT) recovers dense 3D scene
-structure from multi-view images in one forward pass, but quadratic
-cross-frame attention limits its scalability. Existing training-free
-accelerators reduce computation uniformly along one axis, missing layer
-heterogeneity. Our spectral, probing, and causal analyses reveal three
-regimes: shallow layers lack cross-view structure, middle layers drive
-cross-view alignment, and deep layers are redundant for dense geometry
-yet their cross-frame attention remains essential for pose. RegimeVGGT
-applies layer-wise U-shaped compression along two axes: *Saliency-Guided
-Banded Merging* protects geometry- and edge-salient tokens, while
-*Selectively Protected K/V Downsampling* preserves cross-frame spatial
-coverage and the pose-critical path through a phase-shifted spatial
-grid, a reference-frame anchor, and uncompressed camera/register tokens.
-Training-free, RegimeVGGT achieves a **6.7×** speedup over VGGT* at
-matched reconstruction quality.
+| Global layers | Merge ratio | K/V sampling factor |
+| --- | --- | --- |
+| 1-10 | 0.99 | 1.5 |
+| 11-18 | 0.50 | 1.3 |
+| 19-24 | 0.99 | 1.7 |
 
-| Benchmark                       | Metric          | Result               |
-|---------------------------------|-----------------|----------------------|
-| Tanks & Temples (kf=1, 6 scenes)| AUC@30 / time   | 0.9105 / 111s (5.01x)|
-| ScanNet-50 (1000 input frames)  | Chamfer / time  | 0.472 / 71.7s (6.70x)|
+- Frozen DINOv2 CLS attention selects the top 10% salient patches per frame. They are protected during merging and K/V sampling.
+- Camera/register tokens and the first frame are retained; the spatial K/V grid is shifted by frame index.
+- Merge indices are cached within the three bands. Layers 11-14 recompute their indices at each layer.
+- Size-aware attention preserves merged-token multiplicity through an extra Q/K dimension and head-dimension padding.
+- Every global layer uses the final merge-and-sample path; DPT taps retain full token resolution after unmerging.
 
----
+The public method interface is:
 
-## Why three bands?
+```python
+import torch
+from methods.regimevggt import run_aggregator_regimevggt
 
-Two independent diagnostics on stock VGGT's 24 aggregator layers identify the
-same **shallow / middle / deep** partition that RegimeVGGT exploits.
+# model: pretrained VGGT backbone in eval mode
+# images: RGB in [0, 1], shaped [1, frames, 3, height, width]
+with torch.no_grad():
+    features, patch_start_idx = run_aggregator_regimevggt(model, images)
+```
 
-<p align="center">
-  <img src="image/three_band_attention.png" width="850"
-       alt="Cross-frame attention across layers reveals three regimes">
-  <br>
-  <em>Cross-frame attention is diffuse in shallow layers (L1, 3, 5),
-  localized along the correspondence diagonal in the middle band (L13, 15),
-  and collapsed in deep layers (L21, 23).</em>
-</p>
-
-<p align="center">
-  <img src="image/rank_spectrum.png" width="700"
-       alt="Effective attention rank inverted-U across layers">
-  <br>
-  <em>Effective rank of the global-attention matrix is universally
-  inverted-U-shaped, peaking at the middle band L11–L18. Shallow and deep
-  flanks are nearly rank-1 (compressible); the middle band requires denser
-  K/V support to preserve cross-view correspondence.</em>
-</p>
-
-The acceleration policy follows the rank profile: aggressive merge in the
-shallow + deep flanks, conservative merge with full K/V support in the
-middle band, and protected geometry-token / register / frame-0 keys
-throughout.
-
----
-
-## Qualitative pose on long sequences
-
-<p align="center">
-  <img src="image/pose_trajectory.png" width="900"
-       alt="ScanNet-50 1000-frame pose trajectory">
-  <br>
-  <em>Predicted camera trajectories on ScanNet-50 <code>scene0648_01</code>
-  under 1000-frame inference. Left: VGGT* baseline. Center: RegimeVGGT.
-  Right: FastVGGT. Predictions colored by per-frame ATE; ground truth in
-  gray. RegimeVGGT preserves global loop closure at <strong>5×</strong> the
-  speed of VGGT*.</em>
-</p>
-
----
+The returned features feed the existing VGGT camera, depth and point heads. The VGGT backbone and its head dependencies are retained for checkpoint compatibility.
 
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/Tracyou07/RegimeVGGT.git
+cd RegimeVGGT
+python -m pip install -r requirements.txt
 ```
 
-Tested on a single NVIDIA H800 80 GB with PyTorch 2.1+, CUDA 11.8+, Python 3.10+..
+The paper reports measurements on one NVIDIA H800 80 GB at input resolution 518 x 392. Those measurements are paper results; the cleaned implementation still needs a full pretrained GPU benchmark run.
 
 ## Checkpoint
 
-RegimeVGGT uses the **model_tracker_fixed_e20** checkpoint with no
-fine-tuning — the upstream weights with the tracking head attached,
-distributed by Meta on Hugging Face.
+The method uses Meta's `model_tracker_fixed_e20.pt` checkpoint without fine-tuning.
 
 ```bash
-# create a folder and download the model_tracker_fixed_e20.pt checkpoint
 mkdir -p ckpt
 wget -P ckpt \
-    https://huggingface.co/facebook/VGGT_tracker_fixed/resolve/main/model_tracker_fixed_e20.pt
+  https://huggingface.co/facebook/VGGT_tracker_fixed/resolve/main/model_tracker_fixed_e20.pt
+export CKPT="$PWD/ckpt/model_tracker_fixed_e20.pt"
 ```
 
-You can also point `CKPT` directly at any path that holds the file
-(e.g., a shared cache):
+The checkpoint remains subject to the [upstream VGGT terms](https://huggingface.co/facebook/VGGT_tracker_fixed).
+
+## Evaluation
+
+All three launchers run the same final method. Dataset locations, checkpoint paths, frame counts and output locations remain runtime inputs.
 
 ```bash
-export CKPT=/shared/cache/vggt-1b/model_tracker_fixed_e20.pt
-```
+# Tanks & Temples pose
+TNT_DIR=/path/to/tnt/training \
+TNT_COLMAP_DIR=/path/to/tnt/poses \
+CKPT="$CKPT" bash scripts/eval_tnt.sh
 
-The checkpoint is subject to the original VGGT license; see
-<https://huggingface.co/facebook/VGGT_tracker_fixed>.
-
----
-
-
-## Reproduce paper numbers
-
-Reproduction entry points live in `scripts/`. Each reads dataset paths
-and `CKPT` from environment variables — no hardcoded paths, no CLI
-argument needed.
-
-```bash
-# 7Scenes + NRGBD dense reconstruction (Tables 1 & 2)
+# 7Scenes and NRGBD reconstruction; KF can be 3 or 10
 SEVEN_ROOT=/path/to/7scenes \
 NRGBD_ROOT=/path/to/nrgbd \
-CKPT=ckpt/model_tracker_fixed_e20.pt \
-    bash scripts/eval_7andn.sh
+KF=10 CKPT="$CKPT" bash scripts/eval_7andn.sh
+
+# ScanNet-50 reconstruction and pose
+SCANNET_DATA=/path/to/scannet/processed \
+SCANNET_GT_PLY=/path/to/scannet/scans \
+SCANNET_SPLIT=/path/to/scannet_50.txt \
+FRAMES=1000 CKPT="$CKPT" bash scripts/eval_scannet.sh
 ```
 
-Each run writes `summary.json` and `logs.txt` under
-`results/regimevggt/<dataset>/`.
+Use the original benchmark scene list for `SCANNET_SPLIT`, with one scene ID per line. A custom scene subset is a different evaluation protocol.
 
-To compare against uncompressed VGGT*, pass `--method baseline` to the
-underlying `eval/*.py` script (the shell wrappers default to RegimeVGGT).
+The imported release did not include the `data` and `utils` protocol packages required by the 7Scenes/NRGBD evaluator. These dataset adapters and metric helpers must be restored before that evaluation can run. This cleanup does not supply a replacement metric or scene split.
 
----
+Outputs are written under `results/`. Dataset preparation, pretrained inference and benchmark numbers have not been validated by the CPU checks below.
+
+## Local checks
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The checks use small CPU tensors and inspect the real argument parsers and shell launchers. They require no pretrained checkpoint or dataset.
 
 ## Repository layout
 
-```
-RegimeVGGT/
-├── README.md                  # this file
-├── LICENSE
-├── requirements.txt
-├── image/                     # paper figures referenced above
-├── methods/
-│   ├── regimevggt.py          # main aggregator: token merge x K/V phase-shift
-│   └── fastvggt_merge.py      # ToMe bipartite-2d primitive
-├── vggt/                      # forked VGGT-1B model_tracker code (aggregator + heads)
-├── eval/
-│   ├── eval_pose_tnt.py       # T&T 6-scene pose
-│   ├── eval_7andN.py          # 7Scenes + NRGBD dense reconstruction
-│   └── eval_scannet50.py      # ScanNet-50 long-sequence (CD + pose)
-└── scripts/
-    ├── eval_tnt.sh            # T&T pose, env-var-driven
-    ├── eval_7andn.sh          # 7Scenes + NRGBD dense recon
-    └── eval_scannet.sh        # ScanNet-50
+```text
+methods/        Final RegimeVGGT aggregator and token-merging primitive
+vggt/           VGGT backbone, heads and evaluation utilities
+eval/           Dataset evaluation entry points
+scripts/        Evaluation launchers
+tests/          CPU regression and entry-point checks
+image/          Paper figures
 ```
 
----
+## Citation
 
-## License
+```bibtex
+@misc{you2026regimevggt,
+  title={RegimeVGGT: Layer-Wise Spatially Preserving Redundancy Removal for Visual Geometry Grounded Transformer},
+  author={Jinhao You and Shuo Lyu and Zhuohang Lyu and Tanxuan Li and Zibo Zhao and Jiaxiang Hu and Kai Tang and Yichen Guo},
+  year={2026},
+  eprint={2606.18439},
+  archivePrefix={arXiv},
+  primaryClass={cs.CV},
+  url={https://arxiv.org/abs/2606.18439}
+}
+```
 
-Apache-2.0. See `LICENSE`. The VGGT-1B model_tracker weights and the
-original VGGT model code under `vggt/` are subject to the upstream VGGT
-license.
+## Acknowledgements and license
 
----
+This implementation builds on VGGT and the FastVGGT token-merging primitive. Original copyright notices are retained.
 
+Repository code is licensed under Apache-2.0; see `LICENSE`. The original VGGT code under `vggt/` and its weights remain subject to the upstream VGGT license.

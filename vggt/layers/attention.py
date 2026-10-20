@@ -219,13 +219,8 @@ class Attention(nn.Module):
         # instead of being treated as a single token. Training-free.
         # When merge fell through to do_nothing (r=0), m_a has no .size and
         # bias is irrelevant (every K already represents 1 original token).
-        # Ablation hatch: GEOVGGT_DISABLE_SIZE_BIAS=1 forces the unbiased path
-        # so we can measure the +0.001 contribution. Default behaviour
-        # (env unset) is identical to before — main experiments unaffected.
-        import os as _os_sb
-        _SB_DISABLED = _os_sb.environ.get("GEOVGGT_DISABLE_SIZE_BIAS") == "1"
         size_bias = None
-        if (not _SB_DISABLED) and global_merging is not None and global_merging in merge_num:
+        if global_merging is not None and global_merging in merge_num:
             merge_size_attr = getattr(m_a, "size", None)
             if merge_size_attr is not None:
                 # shape [N_kv]; broadcast to [B, H, N_q, N_kv] via the matmul path.

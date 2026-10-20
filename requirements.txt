@@ -9,13 +9,11 @@ Pillow>=10.0
 opencv-python>=4.8
 
 # Evaluation
-trimesh>=4.0          # mesh / point-cloud IO for dense reconstruction eval
-scipy>=1.11           # SVD, alignment, evo trajectory utils
+open3d>=0.18         # dense reconstruction and point-cloud metrics
+evo>=1.25            # trajectory metrics
+scipy>=1.11          # SVD and alignment
+tqdm>=4.66           # evaluation progress
 matplotlib>=3.7       # diagnostic plots
 
 # VGGT model dependencies
-huggingface-hub>=0.20  # checkpoint download 
-safetensors>=0.4
-
-# Optional — only needed for FlashAttention path
-# flash-attn>=2.5.0    # install per your CUDA / torch version
+huggingface-hub>=0.20  # VGGT model hub integration
